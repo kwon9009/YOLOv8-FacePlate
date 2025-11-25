@@ -1,79 +1,80 @@
-import asyncio # 비동기 처리를 위함
+import asyncio # 비동기 처리를 위함 (동시 작업 처리를 위해)
 from fastapi import FastAPI, File, UploadFile, Depends, Form, HTTPException
-from fastapi.staticfiles import StaticFiles # 파일 서버 임포트
-from fastapi.middleware.cors import CORSMiddleware # CORS 설정
-from sqlmodel import SQLModel, Session, select
-from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel # API 입력 모델 임포트
-import uuid # 파일의 고유한 이름을 만들기
-from database import async_engine, create_db_and_tables, get_async_session
-import models
-import security
-import shutil # 파일 저장을 위한 shutil 라이브러리 추가
-# shutil 모듈은 파일 및 디렉토리 복사, 이동, 삭제 등 파일 시스템 관리 작업을 위한 고수준 함수들을 제공하는 표준 라이브러리입니다.
+# API : 서비스의 요청과 응답을 처리하는 기능
+# FastAPI : 파이썬 웹 프레임 워크
+# File, UploadFile : 파일 업로드를 처리하는 도구
+# Depends : 의존성 주입 (DB 세션 등을 함수에 전달할 때 사용)
+# Form : HTML 폼 데이터(이메일, 비밀번호 등)를 받기 위함
+# HTTPException : 에러 발생 시 사용자에게 적절한 에러 코드를 보내기 위함
 
-import os # uploads 폴더 생성을 위해 추가
-# 운영체제에서 제공하는 기능을 파이썬 프로그램에서 쉽게 사용할 수 있도록 해주는 기본 모듈
-
-import sys
-
-import cv2
-
-import numpy as np # 행렬 연산을 위해 추가
-import requests # 모델 파일 다운로드를 위해 추가
+from fastapi.staticfiles import StaticFiles # 정적 파일(이미지, 영상 등)을 웹에서 접근 가능하게 하는 도구
+from fastapi.middleware.cors import CORSMiddleware # 다른 도메인(React 등)에서 서버로 요청을 보낼 수 있게 허용하는 보안 설정 도구
+from sqlmodel import SQLModel, Session, select # DB 모델 정의 및 쿼리 작성을 위한 도구
+from sqlalchemy.ext.asyncio import AsyncSession # 비동기 DB 처리를 위한 세션 도구
+from pydantic import BaseModel # 데이터 검증을 위한 모델 도구 (입력 데이터 형식 정의)
+import uuid # 파일명 중복 방지를 위한 고유 ID 생성 도구
+from database import async_engine, create_db_and_tables, get_async_session # database.py에서 정의한 DB 연결 도구들 가져오기
+import models # models.py에서 정의한 DB 테이블 구조 가져오기
+import security # security.py에서 정의한 비밀번호 암호화 도구 가져오기
+import shutil # 파일 저장(복사, 이동)을 위한 파일 관리 도구 라이브러리
+import os # 파일 경로, 폴더 생성 등 운영체제 기능 사용 도구
+import sys # 시스템 관련 기능을 사용하기 위한 모듈
+import cv2  # OpenCV: 영상 처리 핵심 라이브러리
+import numpy as np # 행렬 연산 도구 (이미지 데이터 처리)
+import requests # 인터넷에서 파일(AI 모델 등)을 다운로드하기 위한 도구
 import bz2 # 압축 해제를 위한 라이브러리
-import traceback # 구체적인 에러 위치를 찾기 위해 추가
+import traceback # 에러 발생 시 자세한 원인을 출력하기 위한 도구
 
-# 윈도우 호환성 패치 (PosixPath 에러 방지)
-import pathlib
-temp = pathlib.PosixPath
-pathlib.PosixPath = pathlib.WindowsPath
+from ultralytics import YOLO # yolov8 라이브러리
 
-from ultralytics import YOLO
+# # 윈도우 호환성 패치 (PosixPath 에러 방지)
+# import pathlib
+# temp = pathlib.PosixPath
+# pathlib.PosixPath = pathlib.WindowsPath
+
+
 #===============================================================================================================
-
-
 
 # -- uploads 폴더 설정 --
 UPLOAD_DIRECTORY = "uploads"
 if not os.path.exists(UPLOAD_DIRECTORY):
     os.makedirs(UPLOAD_DIRECTORY)
+# 'uploads'라는 이름의 폴더가 없으면 새로 만듦.
 
-# DLL 충돌 방지 및 경로 설정
-if hasattr(os, 'add_dll_directory'):
-    try:
-        os.add_dll_directory(os.getcwd())
-    except Exception:
-        pass
-os.environ['PATH'] = os.getcwd() + ';' + os.environ['PATH']
-
-# FastAPI 먼저 선언
+# FastAPI 앱 생성
 app = FastAPI()
 
-# (중요) React(3000번)에서 오는 요청을 허용
+#===============================================================================================================
+
+# CORS 설정
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], # React 서버 주소
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["http://localhost:3000"], # React 프론트엔드 주소만 허용
+    allow_credentials=True, # 쿠키 등 인증 정보 허용
+    allow_methods=["*"], # 모든 HTTP 메서드(GET, POST) 허용
+    allow_headers=["*"], # 모든 헤더 허용
 )
 
+# 서버가 켜질 때 딱 한 번 실행되어 DB 테이블을 만듦
 @app.on_event("startup")
 async def on_startup():
     await create_db_and_tables()
 
+#===============================================================================================================
+
 # /get-analysis/ API가 받을 JSON 요청 본문 모델
+# 결과 조회 시 클라이언트가 보내야 할 데이터 형식(ID는 숫자, 비번은 문자열)을 정의
 class AnalysisLogin(BaseModel):
     request_id: int
     password: str
 
-# =======================================================================
+#===============================================================================================================
 
 # AI 모델 파일 자동 다운로드 함수 (YOLOv8 Face 모델 및 번호판(license-plate) 모델)
 def check_and_download_files():
-    base_path = os.getcwd()
+    base_path = os.getcwd() # 현재 작업 경로
     
+    # 필요한 파일들의 경로 설정
     # 1. YOLOv8 Face 모델 (얼굴 인식 전용 모델)
     face_model_name = "yolov8n-face.pt"
     face_model_path = os.path.join(base_path, face_model_name)
@@ -86,26 +87,26 @@ def check_and_download_files():
     target_dll = "openh264-1.8.0-win64.dll"
     dll_path = os.path.join(base_path, target_dll)
 
-    # 번호판 모델이 너무 작으면(잘못된 다운로드) 삭제
+    # 불량 파일 검사 및 삭제 (파일 크기가 너무 작으면 제대로 다운로드 안 된 것으로 간주)
     if os.path.exists(plate_model_path):
-        if os.path.getsize(plate_model_path) < 5 * 1024 * 1024: # 1MB 이하면 가짜 파일로 간주
-            print("잘못된 번호판 모델입니다. 삭제 후 다시 다운로드합니다.")
+        if os.path.getsize(plate_model_path) < 5 * 1024 * 1024: # 5MB 미만이면 삭제
+            print("잘못된 번호판 인식 모델입니다. 삭제 후 다시 다운로드합니다.")
             try: os.remove(plate_model_path)
             except: pass
 
     # DLL 청소
     if os.path.exists(dll_path):
-        size = os.path.getsize(dll_path)
-        if size < 500000 or size > 900000:
+        if os.path.getsize(dll_path) < 500000: # 500KB 미만이면 삭제
             try: os.remove(dll_path)
             except: pass
     
+    # 잘못된 버전의 DLL 파일 정리 (충돌 방지)
     for f in os.listdir(base_path):
         if f.startswith("openh264") and f.endswith(".dll") and f != target_dll:
             try: os.remove(os.path.join(base_path, f))
             except: pass
 
-# =======================================================================
+#===============================================================================================================
 
     # YOLO Face(얼굴 인식) 모델 다운로드
     if not os.path.exists(face_model_path):
@@ -119,7 +120,7 @@ def check_and_download_files():
                     f.write(chunk)
         except: pass
 
-# =======================================================================
+#===============================================================================================================
 
     # 번호판(license-plate) 모델 다운로드
     if not os.path.exists(plate_model_path):
@@ -149,7 +150,7 @@ def check_and_download_files():
         except Exception as e:
             print(f"번호판 모델 다운로드 에러: {e}")
 
-# =======================================================================
+#===============================================================================================================
 
     # 코덱 DLL 다운로드 (v1.8.0)
     if not os.path.exists(dll_path):
@@ -163,9 +164,9 @@ def check_and_download_files():
         except Exception as e:
             print(f" -> DLL 실패: {e}")
 
-    return face_model_path, plate_model_path
+    return face_model_path, plate_model_path # 모델 파일 경로 2개를 반환
 
-# -----------------------------------------------
+#===============================================================================================================
 
 # 얼굴 = 타원, 번호판 = 네모로 블러 처리 및 AI 분석
 def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
@@ -178,78 +179,82 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
         
         # 모델 로드 시도 (에러 발생 시 터미널에 출력)
         if not os.path.exists(plate_model_path):
-             print("❌ 번호판 모델 파일이 없습니다! 다운로드에 실패했습니다.")
+             print("번호판 모델 파일이 없습니다! 다운로드에 실패했습니다.")
              return {"error": "번호판 모델 파일이 없습니다. 서버 로그를 확인해주세요."}
 
         
-        # 두 개의 모델을 로드
+        # 두 개의 모델을 로드 (메모리에 올림)
         face_model = YOLO(face_model_path)
         plate_model = YOLO(plate_model_path)
 
+        # 영상 파일 열기
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             return {"error": "비디오 파일 열기 실패"}
-            
+        
+        # 영상 정보 가져오기 (너비, 높이, FPS)
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0.0: fps = 30.0
+        if fps == 0.0: fps = 30.0 # FPS 정보 없으면 30으로 가정
 
-        unique_id = str(uuid.uuid4())
-        blurred_filename = f"blur_{original_filename}"
+        # 결과 파일명 및 경로 설정
+        blurred_filename = f"blur_{original_filename}" # 결과 영상은 'blur_' 접두어 붙임
         blurred_filepath = os.path.join(UPLOAD_DIRECTORY, blurred_filename)
         
+        # 영상 저장 설정 (코덱)
+        # avc1 (웹 호환성이 좋음)
         fourcc = cv2.VideoWriter_fourcc(*'avc1')
         out = cv2.VideoWriter(blurred_filepath, fourcc, fps, (frame_width, frame_height))
 
+        # avc1 실패 시 mp4v로 전환
         if not out.isOpened():
             print("avc1 실패, mp4v로 전환")
             fourcc = cv2.VideoWriter_fourcc(*'mp4v')
             out = cv2.VideoWriter(blurred_filepath, fourcc, fps, (frame_width, frame_height))
 
-        total_detections = 0
+        total_detections = 0 # 총 탐지 횟수 카운트
 
-        frame_count = 0
+        frame_count = 0 # 현재 처리 중인 프레임 번호
 
         # 번호판 검증 함수
         def is_valid_plate(x1, y1, x2, y2, frame_w, frame_h):
+            # 너비, 높이 계산
             w = x2 - x1
             h = y2 - y1
             
-            # 1. 비율 검사 : 가로가 세로보다 훨씬 길어야 함 (1.5~6배)
+            # 1. 비율 검사 : 가로가 세로보다 적당히 길어야 함
             aspect_ratio = w / h
-            if aspect_ratio < 1.5 or aspect_ratio > 6.0:
+            if aspect_ratio < 1.2 or aspect_ratio > 8.0:
                 return False
             
-            # 2. 크기 검사 : 화면 전체의 60%를 넘는 거대한 물체는 번호판 아님
+            # 2. 크기 검사 : 화면 전체의 5%를 넘는 거대한 물체는 번호판 아님
             plate_area = w * h
             frame_area = frame_w * frame_h
-            if plate_area / frame_area > 0.6:
-                return False
-            
-            # 3. 최소 크기 : 너무 작은 점 같은 건 무시
-            if w < 30 or h < 10:
+            if plate_area / frame_area > 0.05:
                 return False
             
             return True
 
+        # 프레임 반복 처리 시작
         while cap.isOpened():
             success, frame = cap.read()
-            if not success: break
+            if not success: break # 영상 끝나면 종료
 
-            # 진행 상황 로깅 
+            # 진행 상황 로그 출력 (30프레임마다)
             frame_count += 1
             if frame_count % 30 == 0:
                 print(f"Processing frame {frame_count}...", end='\r')
 
             # 1. 얼굴 인식 (타원형 블러) + CCTV 최적화 (imgsz=1280)
-            # imgsz=1280: 입력 이미지를 크게 키워서 분석하므로 멀리 있는 얼굴도 잡힘
+            # imgsz=1280: 분석 해상도를 키워서 분석하므로 멀리 있는 얼굴도 잡게 함.
             # conf : 민감도 -> conf=(이 값 이상인 것만 잡음)
-            face_results = face_model.predict(frame, conf=0.20, imgsz=1280, verbose=False)
+            face_results = face_model.predict(frame, conf=0.10, imgsz=1280, verbose=False)
 
             # 탐지된 결과 루프
             if face_results:
                 for result in face_results:
+                    # 결과 유효성 검사
                     if result is None or not hasattr(result, 'boxes') or result.boxes is None: continue
 
                     for box in result.boxes:
@@ -258,56 +263,64 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                         # 좌표 추출
                         x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
                         
-                        # 얼굴 패딩
+                        # 블러 영역 설정 (얼굴보다 조금 더 넓게 잡기)
                         w, h = x2 - x1, y2 - y1
                         pad_x = int(w * 0.1)
                         pad_y_top = int(h * 0.2)
                         pad_y_bot = int(h * 0.2)
                         
+                        # 좌표 보정 (화면 밖으로 나가지 않게)
                         bx1 = max(0, x1 - pad_x)
                         by1 = max(0, y1 - pad_y_top)
                         bx2 = min(frame_width, x2 + pad_x)
                         by2 = min(frame_height, y2 + pad_y_bot)
                         
-                        roi = frame[by1:by2, bx1:bx2]
+                        roi = frame[by1:by2, bx1:bx2] # 얼굴 영역 자르기
                         if roi.size == 0: continue
                         
                         try:
+                            # 블러 강도 설정
                             kw = int((bx2-bx1)/1.5) | 1
                             kh = int((by2-by1)/1.5) | 1
                             blurred = cv2.GaussianBlur(roi, (kw, kh), 0)
                             
+                            # 타원형 블러 만들기
                             mask = np.zeros_like(roi)
                             cv2.ellipse(mask, ((bx2-bx1)//2, (by2-by1)//2), ((bx2-bx1)//2, (by2-by1)//2), 0, 0, 360, (255, 255, 255), -1)
+
+                            # 원본 이미지에 타원형 블러 합성
                             frame[by1:by2, bx1:bx2] = np.where(mask > 0, blurred, roi)
                         except: pass
 
             # 2. 번호판 인식 (직사각형 블러)
-            # 민감도 0.25
-            plate_results = plate_model.predict(frame, conf=0.25, imgsz=1280, verbose=False)
-
+            # 민감도 0.05
+            # augment=True : 이미지를 여러 번 변형해서 꼼꼼하게 검사
+            plate_results = plate_model.predict(frame, conf=0.05, imgsz=1280, augment=True, verbose=False)
 
             if plate_results:
                 for result in plate_results:
+                    # 결과 유효성 검사
                     if result is None or not hasattr(result, 'boxes') or result.boxes is None: continue
 
                     for box in result.boxes:
                         total_detections += 1
                         x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
 
+                        # 번호판 검증 통과한 번호판만 처리
                         if is_valid_plate(x1, y1, x2, y2, frame_width, frame_height):
                             total_detections += 1
                             roi = frame[y1:y2, x1:x2]
                             if roi.size == 0: continue
 
                             try:
-                                # 직사각형 블러
+                                # 직사각형 블러 처리
                                 kw = int((x2-x1)/2) | 1
                                 kh = int((y2-y1)/2) | 1
                                 blurred_plate = cv2.GaussianBlur(roi, (kw, kh), 0)
                                 frame[y1:y2, x1:x2] = blurred_plate
                             except: pass
 
+            # 처리된 프레임 저장
             out.write(frame)
 
         cap.release()
@@ -315,6 +328,7 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
 
         print(f"'{blurred_filepath}' YOLO 분석 완료. (총 탐지: {total_detections})")
         
+        # 결과 반환
         return {
             "detection_summary": {"faces_blurred": total_detections},
             "analyzed_video_url": f"/static/{blurred_filename}"
@@ -326,11 +340,12 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
         traceback.print_exc() # <--- 이게 터미널에 빨간 글씨로 뜹니다.
         return {"error": f"서버 내부 오류: {str(e)}"}
 
-# -----------------------------------------------------
+#===============================================================================================================
 
-# 파일 서버 마운트
+# 정적 파일(영상 등) 설정
 app.mount("/static", StaticFiles(directory=UPLOAD_DIRECTORY), name="static")
 
+# 1. 분석 요청 API
 @app.post("/request-analysis/")
 async def upload_video(
     video: UploadFile = File(...),
@@ -338,20 +353,21 @@ async def upload_video(
     password: str = Form(...),
     session: AsyncSession = Depends(get_async_session)
 ):
-    # 1. 원본 영상 저장
+    # 원본 파일 저장
     original_filename = video.filename
     original_filepath = os.path.join(UPLOAD_DIRECTORY, original_filename)
     
     with open(original_filepath, "wb") as buffer:
         shutil.copyfileobj(video.file, buffer)
 
-    # 2. AI 분석 실행
+    # AI 분석 실행
     ai_result_dict = process_video_for_privacy(original_filepath, original_filename)
 
+    # 에러 체크
     if "error" in ai_result_dict:
         raise HTTPException(status_code=500, detail=ai_result_dict["error"])
 
-    # 3. DB 저장
+    # DB에 요청 정보 저장
     hashed_pw = security.get_password_hash(password)
     new_request = models.AnalysisRequest(
         email=email,
@@ -363,12 +379,14 @@ async def upload_video(
     )
 
     session.add(new_request)
+
     try:
         await session.commit()
         await session.refresh(new_request)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"DB 저장 실패: {str(e)}")
 
+    # 결과 응답
     return {
         "message": "분석 완료",
         "request_id": new_request.id,
@@ -377,20 +395,22 @@ async def upload_video(
         "analyzed_video_url": ai_result_dict["analyzed_video_url"]
     }
 
+#===============================================================================================================
+
 # ID와 비밀번호로 분석 결과 가져오기 API
 @app.post("/get-analysis/")
 async def get_analysis(
     login_data: AnalysisLogin,
     session: AsyncSession = Depends(get_async_session)
 ):
-    # 2. DB에서 ID로 게시글 찾기
+    # DB에서 ID로 게시글 찾기
     statement = select(models.AnalysisRequest).where(
         models.AnalysisRequest.id == login_data.request_id
     )
     result = await session.execute(statement)
     db_post = result.scalars().one_or_none()
 
-    # 3. 게시글이 없는 경우
+    # 데이터 존재 유무 및 비밀번호 확인
     if not db_post:
         raise HTTPException(status_code=404, detail="해당 ID의 분석 요청을 찾을 수 없습니다.")
 
