@@ -46,7 +46,7 @@ app = FastAPI()
 
 #===============================================================================================================
 
-# CORS 설정
+# CORS(교차 출처 리소스 공유) 설정
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"], # React 프론트엔드 주소만 허용
@@ -72,7 +72,7 @@ class AnalysisLogin(BaseModel):
 
 # AI 모델 파일 자동 다운로드 함수 (YOLOv8 Face 모델 및 번호판(license-plate) 모델)
 def check_and_download_files():
-    base_path = os.getcwd() # 현재 작업 경로
+    base_path = os.getcwd() # os.getcwd() : 현재 작업 경로를 반환
     
     # 필요한 파일들의 경로 설정
     # 1. YOLOv8 Face 모델 (얼굴 인식 전용 모델)
@@ -226,17 +226,17 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             w = x2 - x1
             h = y2 - y1
             
-            # [추가] 높이가 0이거나 이상하면 바로 무시 (ZeroDivisionError 방지)
+            # 높이가 0이거나 이상하면 바로 무시 (ZeroDivisionError 방지)
             if h <= 0: 
                 return False
             
-            # 거리가 멀리 떨어진 번호판(너비 50px 미만) 탐지
-            if w < 50:
+            # 거리가 멀리 떨어진 번호판(너비 150px 미만) 탐지
+            if w < 150:
                 return True
 
             # 1. 비율 검사 : 가로가 세로보다 적당히 길어야 함
             aspect_ratio = w / h
-            if aspect_ratio < 1.0 or aspect_ratio > 8.0:
+            if aspect_ratio < 0.5 or aspect_ratio > 8.0:
                 return False
             
             # 2. 크기 검사 : 화면 전체의 3%를 넘는 거대한 물체는 번호판 아님
@@ -263,7 +263,7 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             # track : 단순히 찾기만 하는게 아닌, 물체의 이동 경로를 계산함.
             # persist = True (기억 유지) : 이전 장면의 정보를 계속 기억함. 객체가 사라졌다가 나타날 때 필요
             # tracker = "bytetrack.yaml" : 흐릿하거나 신뢰도가 낮을 물체도 연결해주는 알고리즘
-            face_results = face_model.track(frame, conf=0.25, imgsz=1920, augment=True, persist=True, tracker="bytetrack.yaml", verbose=False)
+            face_results = face_model.track(frame, conf=0.35, imgsz=1920, augment=True, persist=True, tracker="bytetrack.yaml", verbose=False)
 
             # 탐지된 결과 루프
             if face_results:
@@ -280,12 +280,12 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                         # 얼굴이 너무 크면 오탐지로 무시하기 (번호판 인식 할 때 얼굴로 인식되는 경우 있음)
                         face_w = x2 - x1
                         face_h = y2 - y1
-                        if (face_w * face_h) > (frame_width * frame_height * 0.10): # 화면의 10% 이상이면 오탐지
+                        if (face_w * face_h) > (frame_width * frame_height * 0.05): # 화면의 5% 이상이면 오탐지
                             continue # 밑에 블러 코드 실행하지 않고 건너뜀
 
                         # 얼굴 비율 검사 추가 (가로로 길거나, 세로로 얇은 건 얼굴이 아님)
                         face_aspect_ratio = face_w / face_h
-                        if face_aspect_ratio > 2.0 or face_aspect_ratio < 0.25:
+                        if face_aspect_ratio > 1.2 or face_aspect_ratio < 0.25:
                             continue
 
                         # 블러 영역 설정 (얼굴보다 조금 더 넓게 잡기)
