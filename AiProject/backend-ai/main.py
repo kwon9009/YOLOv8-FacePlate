@@ -168,7 +168,7 @@ def check_and_download_files():
 
 #===============================================================================================================
 
-# 얼굴 = 타원, 번호판 = 네모로 블러 처리 및 AI 분석
+# 얼굴 = 타원, 번호판 = 직사각형으로 블러 처리 및 AI 분석
 def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
 
     try:
@@ -226,25 +226,31 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             w = x2 - x1
             h = y2 - y1
             
+            # 최소 크기 검사
+            # 너비와 높이가 어느 정도는 되어야 번호판으로 인정
+            if w < 10 or h < 5: 
+                return False
+
             # 높이가 0이거나 이상하면 바로 무시 (ZeroDivisionError 방지)
             if h <= 0: 
                 return False
-            
-            # 거리가 멀리 떨어진 번호판(너비 150px 미만) 탐지
-            if w < 150:
-                return True
 
-            # 1. 비율 검사 : 가로가 세로보다 적당히 길어야 함
-            aspect_ratio = w / h
-            if aspect_ratio < 0.5 or aspect_ratio > 8.0:
+            # 비율 검사 : 가로가 세로보다 적당히 길어야 함
+            aspect_ratio = w / h 
+            if aspect_ratio < 0.5 or aspect_ratio > 10.0: # 하한선 1.0 : 오토바이 등 세로형 번호판, 상한선 10.0 : 멀어질 때 번호판이 납작해지는 것을 고려
                 return False
             
-            # 2. 크기 검사 : 화면 전체의 3%를 넘는 거대한 물체는 번호판 아님
+            # 크기 검사 : 화면 전체의 1.5%를 넘는 거대한 물체는 번호판 아님
             plate_area = w * h
             frame_area = frame_w * frame_h
-            if plate_area / frame_area > 0.03:
+            if plate_area / frame_area > 0.015:
                 return False
             
+            # 위치 검사: 상단 간판 같은 것들 블러 X (위치가 상단에 있는지 검사)
+            center_y = (y1 + y2) / 2
+            if center_y < frame_h * 0.10: # 상단 10% 이내면 무시
+                return False
+
             return True
 
         # 프레임 반복 처리 시작
@@ -263,7 +269,7 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             # track : 단순히 찾기만 하는게 아닌, 물체의 이동 경로를 계산함.
             # persist = True (기억 유지) : 이전 장면의 정보를 계속 기억함. 객체가 사라졌다가 나타날 때 필요
             # tracker = "bytetrack.yaml" : 흐릿하거나 신뢰도가 낮을 물체도 연결해주는 알고리즘
-            face_results = face_model.track(frame, conf=0.35, imgsz=1920, augment=True, persist=True, tracker="bytetrack.yaml", verbose=False)
+            face_results = face_model.track(frame, conf=0.35, imgsz=1280, augment=False, persist=True, tracker="botsort.yaml", verbose=False)
 
             # 탐지된 결과 루프
             if face_results:
@@ -320,7 +326,7 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             # 2. 번호판 인식 (직사각형 블러)
             # 민감도 0.05
             # augment=True : 이미지를 여러 번 변형해서 꼼꼼하게 검사
-            plate_results = plate_model.track(frame, conf=0.05, imgsz=1920, augment=True, persist=True, tracker="bytetrack.yaml", verbose=False)
+            plate_results = plate_model.track(frame, conf=0.05, imgsz=1280, augment=False, persist=True, tracker="botsort.yaml", verbose=False)
 
             current_frame_ids = [] # 이번 프레임에서 잡은 번호판 ID들
 
@@ -343,6 +349,17 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                             # 1. 블러 처리
                             roi = frame[y1:y2, x1:x2]
                             if roi.size == 0: continue
+
+                            try:
+                                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                                mean_brightness = cv2.mean(gray_roi)[0] # 평균 밝기 계산
+
+                                # 밝기가 210 이상이면 전조등으로 판단 후, 패스
+                                if mean_brightness > 210:
+                                    continue
+                            
+                            except:
+                                pass
 
                             try:
                                 kw = int((x2-x1)/2) | 1
