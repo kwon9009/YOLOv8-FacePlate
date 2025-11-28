@@ -172,31 +172,26 @@ def check_and_download_files():
 def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
 
     try:
-        # 파일 체크 및 다운로드
+        # # AI 모델 체크 및 다운로드
         face_model_path, plate_model_path = check_and_download_files()
         
         print(f"'{video_path}' YOLOv8 얼굴 + 번호판 분석 시작.....")
-        
-        # 모델 로드 시도 (에러 발생 시 터미널에 출력)
-        if not os.path.exists(plate_model_path):
-             print("번호판 모델 파일이 없습니다! 다운로드에 실패했습니다.")
-             return {"error": "번호판 모델 파일이 없습니다. 서버 로그를 확인해주세요."}
 
-        
-        # 두 개의 모델을 로드 (메모리에 올림)
+        # 두 개의 AI 모델을 로드 (메모리에 올림)
         face_model = YOLO(face_model_path)
         plate_model = YOLO(plate_model_path)
 
         # 영상 파일 열기
-        cap = cv2.VideoCapture(video_path)
+        cap = cv2.VideoCapture(video_path)  # OpenCV로 영상 파일 열기
         if not cap.isOpened():
             return {"error": "비디오 파일 열기 실패"}
         
-        # 영상 정보 가져오기 (너비, 높이, FPS)
+        # 영상 정보 가져오기 (영상의 너비, 높이, 초당 프레임 수) # 나중에 다시 저장할 때 필요
         frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0.0: fps = 30.0 # FPS 정보 없으면 30으로 가정
+
+        if fps == 0.0: fps = 30.0 # 프레임 정보가 없으면 30으로 가정
 
         # 결과 파일명 및 경로 설정
         blurred_filename = f"blur_{original_filename}" # 결과 영상은 'blur_' 접두어 붙임
@@ -204,14 +199,8 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
         
         # 영상 저장 설정 (코덱)
         # avc1 (웹 호환성이 좋음)
-        fourcc = cv2.VideoWriter_fourcc(*'avc1')
+        fourcc = cv2.VideoWriter_fourcc(*'avc1') # 비디오 압축 방식
         out = cv2.VideoWriter(blurred_filepath, fourcc, fps, (frame_width, frame_height))
-
-        # avc1 실패 시 mp4v로 전환
-        if not out.isOpened():
-            print("avc1 실패, mp4v로 전환")
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(blurred_filepath, fourcc, fps, (frame_width, frame_height))
 
         total_detections = 0 # 총 탐지 횟수 카운트
 
@@ -222,44 +211,44 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
 
         # 번호판 검증 함수
         def is_valid_plate(x1, y1, x2, y2, frame_w, frame_h):
-            # 너비, 높이 계산
-            w = x2 - x1
-            h = y2 - y1
-            
+            # x1, y1: 번호판 왼쪽 위 / x2, y2: 번호판 오른쪽 아래
+
+            w = x2 - x1 # 가로 길이 (오른쪽 끝 - 왼쪽 끝)
+            h = y2 - y1 # 세로 길이 (아래 끝 - 위 끝)
+
             # 최소 크기 검사
-            # 너비와 높이가 어느 정도는 되어야 번호판으로 인정
-            if w < 10 or h < 5: 
+            if w < 10 or h < 5:
                 return False
 
             # 높이가 0이거나 이상하면 바로 무시 (ZeroDivisionError 방지)
             if h <= 0: 
                 return False
 
-            # 비율 검사 : 가로가 세로보다 적당히 길어야 함
-            aspect_ratio = w / h 
-            if aspect_ratio < 0.5 or aspect_ratio > 10.0: # 하한선 1.0 : 오토바이 등 세로형 번호판, 상한선 10.0 : 멀어질 때 번호판이 납작해지는 것을 고려
+            # 작은 번호판 탐지
+            if w < 100:
+                return True
+
+            # 비율 검사
+            aspect_ratio = w / h # 가로:세로 비율
+            # 너무 정사각형이거나 세로로 길면 무시 (간판이나 다른 물체 탐지 방지)
+            if aspect_ratio < 0.2 or aspect_ratio > 10.0:
                 return False
             
-            # 크기 검사 : 화면 전체의 1.5%를 넘는 거대한 물체는 번호판 아님
+            # 크기 검사 : 화면 전체의 10%를 넘는 거대한 물체는 번호판 아님
             plate_area = w * h
             frame_area = frame_w * frame_h
-            if plate_area / frame_area > 0.015:
+            if plate_area / frame_area > 0.10:
                 return False
-            
-            # 위치 검사: 상단 간판 같은 것들 블러 X (위치가 상단에 있는지 검사)
-            center_y = (y1 + y2) / 2
-            if center_y < frame_h * 0.10: # 상단 10% 이내면 무시
-                return False
-
+        
             return True
 
-        # 프레임 반복 처리 시작
+        # 영상이 끝날 때까지 프레임 반복 처리 시작
         while cap.isOpened():
-            success, frame = cap.read()
+            success, frame = cap.read() # 한 프레임 읽기
             if not success: break # 영상 끝나면 종료
 
             # 진행 상황 로그 출력 (30프레임마다)
-            frame_count += 1
+            frame_count += 1 
             if frame_count % 30 == 0:
                 print(f"Processing frame {frame_count}...", end='\r')
 
@@ -281,12 +270,14 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                         total_detections += 1
                         
                         # 좌표 추출
+                        # box.xyxy[0]: AI가 찾은 네모 좌표 [x1, y1, x2, y2]
+                        # map(int, ...): 소수점 좌표를 정수(int)로 변환 (픽셀은 정수여야 하므로)
                         x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
                         
                         # 얼굴이 너무 크면 오탐지로 무시하기 (번호판 인식 할 때 얼굴로 인식되는 경우 있음)
                         face_w = x2 - x1
                         face_h = y2 - y1
-                        if (face_w * face_h) > (frame_width * frame_height * 0.05): # 화면의 5% 이상이면 오탐지
+                        if (face_w * face_h) > (frame_width * frame_height * 0.025): # 화면의 2.5% 이상이면 오탐지
                             continue # 밑에 블러 코드 실행하지 않고 건너뜀
 
                         # 얼굴 비율 검사 추가 (가로로 길거나, 세로로 얇은 건 얼굴이 아님)
@@ -295,38 +286,40 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                             continue
 
                         # 블러 영역 설정 (얼굴보다 조금 더 넓게 잡기)
-                        w, h = x2 - x1, y2 - y1
-                        pad_x = int(w * 0.1)
-                        pad_y_top = int(h * 0.2)
-                        pad_y_bot = int(h * 0.2)
+                        w, h = x2 - x1, y2 - y1 # 얼굴 폭, 높이 구하기
+                        pad_x = int(w * 0.1) # 폭의 10%만큼 여유 두기
+                        pad_y_top = int(h * 0.2) # 높이의 20%만큼 위로 여유 두기 (이마/머리카락)
+                        pad_y_bot = int(h * 0.2) # 높이의 20%만큼 아래로 여유 두기 (턱)
                         
-                        # 좌표 보정 (화면 밖으로 나가지 않게)
-                        bx1 = max(0, x1 - pad_x)
-                        by1 = max(0, y1 - pad_y_top)
-                        bx2 = min(frame_width, x2 + pad_x)
-                        by2 = min(frame_height, y2 + pad_y_bot)
+                        # 좌표 확장 (화면 밖으로 나가지 않게 max/min 사용)
+                        bx1 = max(0, x1 - pad_x) # 왼쪽으로 확장 (0보다 작아지면 0으로)
+                        by1 = max(0, y1 - pad_y_top) # 위로 확장
+                        bx2 = min(frame_width, x2 + pad_x) # 오른쪽으로 확장 (화면 폭 넘지 않게)
+                        by2 = min(frame_height, y2 + pad_y_bot) # 아래로 확장
                         
                         roi = frame[by1:by2, bx1:bx2] # 얼굴 영역 자르기
                         if roi.size == 0: continue
                         
                         try:
                             # 블러 강도 설정
-                            kw = int((bx2-bx1)/1.5) | 1
+                            # (bx2-bx1)/1.5 : 얼굴 크기에 비례해서 흐림 강도 조절
+                            kw = int((bx2-bx1)/1.5) | 1 # 홀수여야 해서 '| 1' 비트연산 사용
                             kh = int((by2-by1)/1.5) | 1
                             blurred = cv2.GaussianBlur(roi, (kw, kh), 0)
                             
                             # 타원형 블러 만들기
                             mask = np.zeros_like(roi)
+                            # 흰색 타원 그리기
                             cv2.ellipse(mask, ((bx2-bx1)//2, (by2-by1)//2), ((bx2-bx1)//2, (by2-by1)//2), 0, 0, 360, (255, 255, 255), -1)
 
-                            # 원본 이미지에 타원형 블러 합성
+                            # np.where: 마스크가 흰색인 부분은 'blurred'를, 검은색은 'roi(원본)'을 씀
                             frame[by1:by2, bx1:bx2] = np.where(mask > 0, blurred, roi)
                         except: pass
 
             # 2. 번호판 인식 (직사각형 블러)
-            # 민감도 0.05
+            # 민감도 0.01 : 작은 번호판도 잡기 위함
             # augment=True : 이미지를 여러 번 변형해서 꼼꼼하게 검사
-            plate_results = plate_model.track(frame, conf=0.05, imgsz=1280, augment=False, persist=True, tracker="botsort.yaml", verbose=False)
+            plate_results = plate_model.track(frame, conf=0.01, imgsz=1920, augment=True, persist=True, tracker="botsort.yaml", verbose=False)
 
             current_frame_ids = [] # 이번 프레임에서 잡은 번호판 ID들
 
@@ -346,31 +339,42 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                         if is_valid_plate(x1, y1, x2, y2, frame_width, frame_height):
                             total_detections += 1
 
+                            # 번호판 영역 확장(안정적으로 블러 처리하기 위함)
+                            w_plate = x2 - x1
+                            h_plate = y2 - y1
+                            
+                            pad_w = int(w_plate * 0.15) # 좌우 15% 확장
+                            pad_h = int(h_plate * 0.15) # 상하 15% 확장
+                            
+                            # 확장된 좌표 계산 (화면 밖으로 나가지 않게 조절)
+                            px1 = max(0, x1 - pad_w)
+                            py1 = max(0, y1 - pad_h)
+                            px2 = min(frame_width, x2 + pad_w)
+                            py2 = min(frame_height, y2 + pad_h)
+
                             # 1. 블러 처리
-                            roi = frame[y1:y2, x1:x2]
+                            roi = frame[py1:py2, px1:px2]
                             if roi.size == 0: continue
 
                             try:
-                                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                                mean_brightness = cv2.mean(gray_roi)[0] # 평균 밝기 계산
+                                # 밝기 필터 (너무 밝은 헤드라이트 제외)
+                                # 멀리 있는 번호판은 뭉개져서 밝기 계산이 부정확할 수 있으므로, 
+                                # 크기가 클 때(100px 이상)만 밝기 검사 수행
+                                if w_plate > 100:
+                                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                                    mean_brightness = cv2.mean(gray_roi)[0]
+                                    if mean_brightness > 300: continue
 
-                                # 밝기가 210 이상이면 전조등으로 판단 후, 패스
-                                if mean_brightness > 210:
-                                    continue
-                            
-                            except:
-                                pass
-
-                            try:
-                                kw = int((x2-x1)/2) | 1
-                                kh = int((y2-y1)/2) | 1
+                                # 블러 정도
+                                kw = int((px2-px1)/2) | 1
+                                kh = int((py2-py1)/2) | 1
                                 blurred_plate = cv2.GaussianBlur(roi, (kw, kh), 0)
-                                frame[y1:y2, x1:x2] = blurred_plate
+                                frame[py1:py2, px1:px2] = blurred_plate
                             except: pass
 
                             # 2. 메모리에 저장
                             if track_id != -1:
-                                plate_memory[track_id] = {'coords': (x1, y1, x2, y2), 'life': 15}
+                                plate_memory[track_id] = {'coords': (px1, py1, px2, py2), 'life': 30}
                                 current_frame_ids.append(track_id)
 
             # 놓친 번호판 블러 처리
@@ -403,11 +407,11 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             for k in keys_to_remove:
                 del plate_memory[k]
 
-            # 처리된 프레임 저장
+            # 처리된 프레임을 비디오 파일에 저장(녹화)
             out.write(frame)
 
-        cap.release()
-        out.release()
+        cap.release() # 영상 파일 닫기
+        out.release() # 저장 완료
 
         print(f"'{blurred_filepath}' YOLO 분석 완료. (총 탐지: {total_detections})")
         
