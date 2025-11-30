@@ -219,19 +219,30 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             w = x2 - x1 # 가로 길이 (오른쪽 끝 - 왼쪽 끝)
             h = y2 - y1 # 세로 길이 (아래 끝 - 위 끝)
 
-            # 1. 노이즈 제거
-            if w < 5 or h < 5: return False
-
-            # 2. 높이가 0이거나 이상하면 바로 무시 (ZeroDivisionError 방지)
+            # 높이가 0이거나 이상하면 바로 무시 (ZeroDivisionError 방지)
             if h <= 0: 
                 return False
 
-            # 3. 비율 검사 (표지판/창문 같은 다른 물체 무시)
-            aspect_ratio = w / h
-            if aspect_ratio < 1.5 or aspect_ratio > 6.0:
+            # 노이즈 제거
+            if w < 5 or h < 5: return False
+
+            # 보닛(Bonnet) 필터: 화면 맨 아래쪽에 꽉 찬 큰 물체는 내 차 보닛임 -> 무시
+            # y2(아래쪽 좌표)가 화면 밑바닥(90% 지점)에 있고, 너비가 화면 절반 이상이면 무시
+            if y2 > frame_h * 0.90 and w > frame_w * 0.40:
                 return False
 
-            # 4. 크기 검사 (화면의 8% 이상이면 차 뒷유리일 확률 높음)
+            # 비율 검사 (표지판/창문 같은 다른 물체 무시)
+            aspect_ratio = w / h
+            # 80px 미만이면 비율이 좀 뭉개져도 통과
+            if w < 80:
+                if aspect_ratio < 1.0 or aspect_ratio > 8.0:
+                    return False
+            else:
+                # 큰 번호판 -> 깐깐하게 검사 (표지판/창문 제거)
+                if aspect_ratio < 1.5 or aspect_ratio > 5.0:
+                    return False
+
+            # 크기 검사 (화면의 8% 이상이면 차 뒷유리일 확률 높음)
             plate_area = w * h
             frame_area = frame_w * frame_h
             if plate_area / frame_area > 0.08:
@@ -249,8 +260,8 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                 cx1, cy1, cx2, cy2 = c_box
                 # 번호판 중심점이 자동차 박스 안에 있는지 확인
                 # 자동차 박스를 확장해서 검사
-                pad_w = (cx2 - cx1) * 0.05
-                pad_h = (cy2 - cy1) * 0.10
+                pad_w = (cx2 - cx1) * 0.20
+                pad_h = (cy2 - cy1) * 0.20
 
                 if (cx1 - pad_w) < p_center_x < (cx2 + pad_w) and \
                 (cy1 - pad_h) < p_center_y < (cy2 + pad_h):
@@ -268,7 +279,7 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                 print(f"Processing frame {frame_count}...", end='\r')
 
             # 차량 탐지 (2=car, 3=motorcycle, 5=bus, 7=truck)
-            car_results = car_model(frame, classes=[2, 3, 5, 7], imgsz=640, verbose=False, conf=0.25)
+            car_results = car_model(frame, classes=[2, 3, 5, 7], imgsz=640, verbose=False, conf=0.1)
             
             car_boxes = []
             if car_results:
@@ -281,7 +292,7 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
             # track : 단순히 찾기만 하는게 아닌, 물체의 이동 경로를 계산함.
             # persist = True (기억 유지) : 이전 장면의 정보를 계속 기억함. 객체가 사라졌다가 나타날 때 필요
             # tracker = "bytetrack.yaml" : 흐릿하거나 신뢰도가 낮을 물체도 연결해주는 알고리즘
-            face_results = face_model.track(frame, conf=0.35, imgsz=1280, augment=False, persist=True, tracker="botsort.yaml", verbose=False)
+            face_results = face_model.track(frame, conf=0.25, imgsz=1280, augment=False, persist=True, tracker="botsort.yaml", verbose=False)
 
             # 탐지된 결과 루프
             if face_results:
@@ -370,66 +381,75 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                             p_cy = (y1 + y2) / 2
 
                             for c_box in car_boxes:
-                                cx1, cy1, cx2, cy2 = cbox
+                                cx1, cy1, cx2, cy2 = c_box
+                                c_w = cx2 - cx1
                                 c_h = cy2 - cy1
 
-                                # 자동차 박스 안에 있는지 (여유 10%)
-                                pad_w = (cx2 - cx1) * 0.1
-                                pad_h = (cy2 - cy1) * 0.1
+                                # 자동차 박스 안에 있는지 (여유 20%)
+                                pad_w = c_w * 0.20
+                                pad_h = c_h * 0.20
                                 if (cx1 - pad_w) < p_cx < (cx2 + pad_w) and \
                                    (cy1 - pad_h) < p_cy < (cy2 + pad_h):
                                         
-                                    # 차량 상단 30%에 있으면 무시 (창문/지붕 방지)
-                                    if (p_cy - cy1) < (c_h * 0.30):
-                                        continue
+                                    # 위치 필터: 단, 번호판이 아주 작으면(멀면) 위치 검사 생략 (멀면 위치 부정확함)
+                                    # 80px 이상인 큰 번호판만 '지붕/창문' 검사 수행
+                                    if (x2 - x1) > 80:
+                                        if (p_cy - cy1) < (c_h * 0.30): # 상단 30% 무시
+                                            continue
                                     
+                                        # 좌우로 치우쳐 있는지 검사 (백라이트 제외하기)
+                                        # 번호판 중심과 차 중심의 거리가 차 폭의 35% 이상 벗어나면 백라이트일 확률이 높음
+                                        c_cx = (cx1 + cx2) / 2
+                                        if abs(p_cx - c_cx) > (c_w * 0.35): continue
+
                                     valid_loc = True
                                     break
-                            else:
-                                # 차량을 못 찾았을 땐 오탐지로 간주
-                                valid_loc = False
                         
-                            if not valid_loc: continue
+                        else:
+                            valid_loc = False
 
-                            total_detections += 1
+                        # 차가 발견되지 않았거나(len=0), 차 밖이면 -> 가짜로 간주하고 무시
+                        # 허공에 뜬 표지판이나 노이즈가 제거
+                        if not valid_loc: continue
 
-                            # 번호판 영역 확장(안정적으로 블러 처리하기 위함)
-                            w_plate = x2 - x1
-                            h_plate = y2 - y1
+                        total_detections += 1
+
+                        # 번호판 영역 확장(안정적으로 블러 처리하기 위함)
+                        w_plate = x2 - x1
+                        h_plate = y2 - y1
+                        
+                        pad_w = int(w_plate * 0.10) # 좌우 10% 확장
+                        pad_h = int(h_plate * 0.10) # 상하 10% 확장
                             
-                            pad_w = int(w_plate * 0.10) # 좌우 10% 확장
-                            pad_h = int(h_plate * 0.10) # 상하 10% 확장
-                            
-                            # 확장된 좌표 계산 (화면 밖으로 나가지 않게 조절)
-                            px1 = max(0, x1 - pad_w)
-                            py1 = max(0, y1 - pad_h)
-                            px2 = min(frame_width, x2 + pad_w)
-                            py2 = min(frame_height, y2 + pad_h)
+                        # 확장된 좌표 계산 (화면 밖으로 나가지 않게 조절)
+                        px1 = max(0, x1 - pad_w)
+                        py1 = max(0, y1 - pad_h)
+                        px2 = min(frame_width, x2 + pad_w)
+                        py2 = min(frame_height, y2 + pad_h)
 
-                            # 1. 블러 처리
-                            roi = frame[py1:py2, px1:px2]
-                            if roi.size == 0: continue
+                        # 1. 블러 처리
+                        roi = frame[py1:py2, px1:px2]
+                        if roi.size == 0: continue
 
-                            try:
-                                # 밝기 필터 (너무 밝은 헤드라이트 제외)
-                                # 멀리 있는 번호판은 뭉개져서 밝기 계산이 부정확할 수 있으므로, 
-                                # 크기가 클 때(100px 이상)만 밝기 검사 수행
-                                if w_plate > 100:
-                                    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                                    mean_brightness = cv2.mean(gray_roi)[0]
-                                    if mean_brightness > 300: continue
+                        try:
+                            # 밝기 필터 (너무 밝은 헤드라이트 제외)
+                            # 멀리 있는 번호판은 뭉개져서 밝기 계산이 부정확할 수 있으므로, 
+                            # 크기가 클 때(100px 이상)만 밝기 검사 수행
+                            if w_plate > 100:
+                                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                                mean_brightness = cv2.mean(gray_roi)[0]
+                                if mean_brightness > 250: continue
 
-                                # 블러 정도
-                                kw = int((px2-px1)/2) | 1
-                                kh = int((py2-py1)/2) | 1
-                                blurred_plate = cv2.GaussianBlur(roi, (kw, kh), 0)
-                                frame[py1:py2, px1:px2] = blurred_plate
-                            except: pass
+                            # 블러 정도
+                            kw = int((px2-px1)/2) | 1
+                            kh = int((py2-py1)/2) | 1
+                            frame[py1:py2, px1:px2] = cv2.GaussianBlur(roi, (kw, kh), 0)
+                        except: pass
 
-                            # 2. 메모리에 저장
-                            if track_id != -1:
-                                plate_memory[track_id] = {'coords': (px1, py1, px2, py2), 'life': 15}
-                                current_frame_ids.append(track_id)
+                        # 2. 메모리에 저장
+                        if track_id != -1:
+                            plate_memory[track_id] = {'coords': (px1, py1, px2, py2), 'life': 60}
+                            current_frame_ids.append(track_id)
 
             # 놓친 번호판 블러 처리
             keys_to_remove = []
@@ -514,8 +534,13 @@ def process_video_for_privacy(video_path: str, original_filename: str) -> dict:
                             
                             # 위치 검사 (차량 상단 30% 무시)
                             p_cy = (gy1 + gy2) / 2
-                            if (p_cy - cy1) < (ch * 0.30):
-                                continue
+                            p_cx = (gx1 + gx2) / 2
+                            c_cx = (cx1 + cx2) / 2
+
+                            # 번호판 너비가 80px 이상일 때만 상단 검사 (멀리 있는건 봐줌)
+                            if (gx2 - gx1) > 80:
+                                if (p_cy - cy1) < (ch * 0.30): continue # 상단 무시
+                                if abs(p_cx - c_cx) > (cw * 0.35): continue # 좌우 끝(백라이트) 무시
 
                             roi = frame[gy1:gy2, gx1:gx2] # 좌표대로 자른 영역만 가져오기
                             if roi.size > 0:
